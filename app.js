@@ -2,6 +2,7 @@ ObjC.import('AppKit')
 
 const WIDTH = 336
 const HEIGHT = 365
+const UPDATE_HEIGHT = 54
 const STATUS_WIDTH = 70
 const ASSET_NAME = 'ChatGPTUsage'
 const INTERVAL = 120
@@ -14,6 +15,7 @@ const nil = null
 let app, item, target, panel, statusText, footerText, refreshButton, refreshTimer
 let cards = {}, windows = {}, client = null, phase = 'loading', updateTime = 0
 let lastAttempt = 0, lastResetAttempt = '', supportMessage = ''
+let checkButton, updateMessage, releaseButton, releaseURL, updateRequest
 
 function rect(x, y, w, h) { return $.NSMakeRect(x,y,w,h) }
 function rounded(x,y,w,h,r,c) {
@@ -279,6 +281,81 @@ function showPanel(nearMenuBar) {
   panel.makeKeyAndOrderFront(target)
   if (!client && nowSeconds()-lastAttempt >= 30) refresh()
 }
+
+function installedVersion() {
+  return ObjC.unwrap($.NSBundle.mainBundle.objectForInfoDictionaryKey('CFBundleShortVersionString'))
+}
+
+function showUpdateResult(result) {
+  releaseURL = result.url
+  updateMessage.stringValue = result.message
+  releaseButton.hidden = !releaseURL
+  checkButton.enabled = true
+}
+
+function checkForUpdates() {
+  if (updateRequest) return
+  updateMessage.stringValue = 'Checking GitHub for updates…'
+  releaseButton.hidden = true
+  releaseURL = null
+  checkButton.enabled = false
+
+  const files = $.NSFileManager.defaultManager
+  const dir = ObjC.unwrap($.NSTemporaryDirectory()) + 'ChatGPTUsage-' + ObjC.unwrap($.NSUUID.UUID.UUIDString)
+  const path = dir + '/response'
+  let output
+  try {
+    if (!files.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(dir,false,$({NSFilePosixPermissions:448}),nil)) {
+      throw Error('Couldn’t create the response directory.')
+    }
+    const task = $.NSTask.alloc.init
+    updateRequest = {task,dir,path}
+    if (!files.createFileAtPathContentsAttributes(path,$.NSData.data,$.NSDictionary.dictionary)) {
+      throw Error('Couldn’t create the response file.')
+    }
+    output = $.NSFileHandle.fileHandleForWritingAtPath(path)
+    task.executableURL = $.NSURL.fileURLWithPath('/usr/bin/curl')
+    task.arguments = ['-q','--silent','--max-time','12','--max-filesize','2097152',
+      '--header','Accept: application/vnd.github+json',
+      '--user-agent',ASSET_NAME,'--write-out','\n%{http_code}',LATEST_RELEASE_API]
+    task.standardOutput = output
+    task.standardError = $.NSFileHandle.fileHandleWithNullDevice
+    if (!task.launchAndReturnError(nil)) throw Error('Couldn’t launch update request.')
+    const timer = $.NSTimer.timerWithTimeIntervalTargetSelectorUserInfoRepeats(0.25,target,'finishUpdateCheck:',nil,true)
+    updateRequest.timer = timer
+    $.NSRunLoop.mainRunLoop.addTimerForMode(timer,$.NSRunLoopCommonModes)
+  } catch (_) {
+    stopUpdateCheck()
+    showUpdateResult({message:'Couldn’t start the update check. Try again.'})
+  } finally {
+    if (output && !output.isNil()) output.closeFile
+  }
+}
+
+function stopUpdateCheck() {
+  if (!updateRequest) return
+  const {task,dir,timer} = updateRequest
+  updateRequest = null
+  if (timer) timer.invalidate
+  if (task.running) task.terminate
+  $.NSFileManager.defaultManager.removeItemAtPathError(dir,nil)
+}
+
+function finishUpdateCheck() {
+  if (!updateRequest || updateRequest.task.running) return
+  const {task,path} = updateRequest
+  let result = {message:'Couldn’t reach GitHub. Try again.'}
+  try {
+    if (Number(task.terminationStatus) === 0) {
+      const output = ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(path,$.NSUTF8StringEncoding,nil))
+      result = releaseStatus(output || '',installedVersion())
+    }
+  } finally {
+    stopUpdateCheck()
+    showUpdateResult(result)
+  }
+}
+
 function method(types,implementation) { return {types,implementation} }
 
 ObjC.registerSubclass({name:'ChatGPTUsageController',methods:{
@@ -291,15 +368,22 @@ ObjC.registerSubclass({name:'ChatGPTUsageController',methods:{
   'receive:':method(['void',['id']],function(n){ try { receive(n) } catch (_) { fail('Codex returned an unreadable response.') } }),
   'timeout:':method(['void',['id']],function(){ fail('Codex took too long to respond. Try Refresh.') }),
   'refresh:':method(['void',['id']],function(){ refresh() }),
+  'checkForUpdates:':method(['void',['id']],function(){ checkForUpdates() }),
+  'finishUpdateCheck:':method(['void',['id']],function(){ finishUpdateCheck() }),
+  'openRelease:':method(['void',['id']],function(){
+    if (releaseURL) $.NSWorkspace.sharedWorkspace.openURL($.NSURL.URLWithString(releaseURL))
+  }),
   'dashboard:':method(['void',['id']],function(){ $.NSWorkspace.sharedWorkspace.openURL($.NSURL.URLWithString('https://chatgpt.com/codex/settings/usage')) }),
-  'quit:':method(['void',['id']],function(){ stop(); app.terminate(target) })
+  'quit:':method(['void',['id']],function(){ stopUpdateCheck(); stop(); app.terminate(target) })
 }})
 
 function run() {
   app = $.NSApplication.sharedApplication
   app.setActivationPolicy($.NSApplicationActivationPolicyAccessory)
   target = $.ChatGPTUsageController.alloc.init
-  const root = $.NSView.alloc.initWithFrame(rect(0,0,WIDTH,HEIGHT))
+  const content = $.NSView.alloc.initWithFrame(rect(0,0,WIDTH,HEIGHT + UPDATE_HEIGHT))
+  const root = $.NSView.alloc.initWithFrame(rect(0,UPDATE_HEIGHT,WIDTH,HEIGHT))
+  content.addSubview(root)
   field(root,18,340,200,13,10,$.NSFontWeightSemibold,secondary(),'CHATGPT  /  CODEX')
   field(root,18,306,245,30,25,$.NSFontWeightSemibold,label(),ASSET_NAME)
   statusText = field(root,244,319,74,16,10,$.NSFontWeightBold,secondary(),'CHECKING',$.NSTextAlignmentRight)
@@ -311,10 +395,18 @@ function run() {
   refreshButton = button(root,'Refresh','refresh:',15,18,74,'r')
   button(root,'Usage Dashboard ↗','dashboard:',94,18,139,'')
   button(root,'Quit','quit:',265,18,55,'q')
+  const separator = $.NSBox.alloc.initWithFrame(rect(18,UPDATE_HEIGHT,300,1))
+  separator.boxType = $.NSBoxSeparator
+  content.addSubview(separator)
+  updateMessage = field(content,18,30,300,16,11,$.NSFontWeightRegular,secondary(),
+    'Installed version ' + installedVersion())
+  checkButton = button(content,'Check for Updates','checkForUpdates:',15,5,145,'')
+  releaseButton = button(content,'View Release ↗','openRelease:',179,5,142,'')
+  releaseButton.hidden = true
   const style = Number($.NSWindowStyleMaskTitled) | Number($.NSWindowStyleMaskClosable)
-  panel = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(root.frame,style,$.NSBackingStoreBuffered,false)
+  panel = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(content.frame,style,$.NSBackingStoreBuffered,false)
   panel.title = ASSET_NAME
-  panel.contentView = root
+  panel.contentView = content
   panel.releasedWhenClosed = false
   panel.hidesOnDeactivate = true
   item = $.NSStatusBar.systemStatusBar.statusItemWithLength(STATUS_WIDTH)

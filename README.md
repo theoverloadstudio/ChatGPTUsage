@@ -8,4 +8,8 @@ The panel highlights when your usage is ahead of the window's pace. It refreshes
 
 Requires macOS 13 or later and the ChatGPT desktop app with Codex, or a Codex CLI signed in with ChatGPT. Usage comes from the local Codex app server.
 
+Click **Check for Updates** in the usage panel to compare your installed version with the latest stable [GitHub release](https://github.com/theoverloadstudio/ChatGPTUsage/releases). When an update is available, **View Release** opens its page so you can download the new build.
+
 Build on a Mac with `bash build.sh`, then open the resulting **ChatGPTUsage.app**. The build uses tools bundled with macOS.
+
+To make a new version available to the update checker, bump both version values in `build.sh`, build the app, and attach a ZIP of the app to a stable GitHub release with a matching tag such as `v1.0.2`.
